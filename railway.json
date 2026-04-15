@@ -1,0 +1,9 @@
+{
+  "build": {
+    "builder": "NIXPACKS",
+    "nixpacks": {
+      "PHASE": "build",
+      "START_COMMAND": "gunicorn magicplan_webhook_server:app"
+    }
+  }
+}
