@@ -102,6 +102,18 @@ def magicplan_webhook():
         return Response(f'<MagicPlanService><status>1</status><message>{str(e)}</message></MagicPlanService>', 
                        mimetype='text/xml'), 500
 
+@app.route('/')
+def index():
+    """Root redirect to test page"""
+    return """
+    <html><body>
+    <h1>Magicplan Webhook Server ✅</h1>
+    <p>Server is running and ready!</p>
+    <p>Webhook endpoint: <code>/webhook</code></p>
+    <p>Dropbox: {}</p>
+    </body></html>
+    """.format("Configured ✅" if DROPBOX_ACCESS_TOKEN else "NOT CONFIGURED - Set DROPBOX_ACCESS_TOKEN")
+
 @app.route('/health', methods=['GET'])
 def health():
     """Health check endpoint"""
