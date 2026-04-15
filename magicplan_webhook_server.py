@@ -20,7 +20,6 @@ import json
 import re
 import requests
 from difflib import SequenceMatcher
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask, request, Response
 import logging
 
@@ -219,30 +218,39 @@ def magicplan_webhook():
         # Collect file URLs from webhook data
         files_to_download = []
         
-        # Handle multiple file types - check for many files (jpg0, jpg1, ... jpg99)
-        file_patterns = ['jpg', 'png', 'pdf', 'dxf', 'svg', 'video']
+        # Handle multiple file types
+        file_patterns = [
+            ('pdf', r'^pdf\d*$'),
+            ('jpg', r'^jpg\d+$'),
+            ('png', r'^png\d+$'),
+            ('dxf', r'^dxf\d*$'),
+            ('svg', r'^svg\d*$'),
+        ]
         
-        for key in data.keys():
-            # Check if it's a file key we care about
-            is_file_key = False
-            for pattern in file_patterns:
-                if key == pattern or re.match(rf'^{pattern}\d+$', key, re.IGNORECASE):
-                    is_file_key = True
-                    break
-            
-            if is_file_key and data[key] and data[key].startswith('http'):
+        for key, pattern in file_patterns:
+            # Check for single file (like 'pdf')
+            if key in data and data[key] and data[key].startswith('http'):
                 files_to_download.append((key, data[key]))
+            
+            # Check for numbered files (like 'jpg0', 'jpg1', etc.)
+            for i in range(10):
+                numbered_key = f"{key}{i}"
+                if numbered_key in data and data[numbered_key] and data[numbered_key].startswith('http'):
+                    files_to_download.append((numbered_key, data[numbered_key]))
         
-        logger.info(f"Files to download: {len(files_to_download)} files")
+        logger.info(f"Files to download: {[f[0] for f in files_to_download]}")
         
         # Download and upload to Dropbox
         if DROPBOX_ACCESS_TOKEN:
-            def upload_file(task):
-                file_key, url = task
+            uploaded_photos = 0
+            uploaded_plans = 0
+            
+            for file_key, url in files_to_download:
                 try:
                     # Determine file type
                     is_image = re.match(r'^(jpg|png)\d*$', file_key, re.IGNORECASE)
                     is_video = 'video' in file_key.lower()
+                    is_plan = file_key.lower().startswith(('pdf', 'dxf', 'svg'))
                     
                     # Set destination based on file type
                     if is_image or is_video:
@@ -253,26 +261,16 @@ def magicplan_webhook():
                     # Download and upload
                     content = download_file(url)
                     result = upload_to_dropbox(content, dest_path)
-                    return ('success', file_key, result.get('name', 'unknown'))
-                except Exception as e:
-                    return ('error', file_key, str(e))
-            
-            # Upload with parallel threads
-            uploaded_photos = 0
-            uploaded_plans = 0
-            
-            with ThreadPoolExecutor(max_workers=10) as executor:
-                futures = {executor.submit(upload_file, task): task for task in files_to_download}
-                for future in as_completed(futures):
-                    result = future.result()
-                    if result[0] == 'success':
-                        if re.match(r'^(jpg|png)\d*$', result[1], re.IGNORECASE) or 'video' in result[1].lower():
-                            uploaded_photos += 1
-                        else:
-                            uploaded_plans += 1
-                        logger.info(f"Uploaded {result[1]}")
+                    
+                    if is_image or is_video:
+                        uploaded_photos += 1
                     else:
-                        logger.error(f"Failed to upload {result[1]}: {result[2]}")
+                        uploaded_plans += 1
+                    
+                    logger.info(f"Uploaded {file_key}: {result.get('name', 'unknown')}")
+                    
+                except Exception as e:
+                    logger.error(f"Failed to upload {file_key}: {e}")
             
             logger.info(f"Upload complete: {uploaded_photos} photos/videos, {uploaded_plans} plans")
         
