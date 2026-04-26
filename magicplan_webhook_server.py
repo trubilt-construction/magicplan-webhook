@@ -23,6 +23,8 @@ from difflib import SequenceMatcher
 from flask import Flask, request, Response
 import logging
 
+from dropbox_upload import get_access_token
+
 # Allowed Dropbox path prefixes for /file endpoint (defence-in-depth: stops the
 # endpoint from being abused as a generic Dropbox file reader if the auth token
 # leaks).
@@ -55,12 +57,16 @@ app = Flask(__name__)
 
 # Configuration
 DROPBOX_JOB_FOLDER = "/Trubilt/JOBS"
-DROPBOX_ACCESS_TOKEN = os.environ.get("DROPBOX_ACCESS_TOKEN", "")
-if not DROPBOX_ACCESS_TOKEN:
+
+# Local-dev fallback: if DROPBOX_ACCESS_TOKEN env var isn't set and a token
+# file exists, copy its contents into the env var so get_access_token() can
+# pick it up below. The preferred config in production is the refresh-token
+# flow (DROPBOX_REFRESH_TOKEN + DROPBOX_APP_KEY + DROPBOX_APP_SECRET).
+if not os.environ.get("DROPBOX_ACCESS_TOKEN"):
     token_file = os.path.expanduser("~/.opencode/dropbox_token.txt")
     if os.path.exists(token_file):
         with open(token_file, 'r') as f:
-            DROPBOX_ACCESS_TOKEN = f.read().strip()
+            os.environ["DROPBOX_ACCESS_TOKEN"] = f.read().strip()
 
 # Cache job folders to avoid repeated API calls
 _job_folders_cache = None
@@ -74,7 +80,7 @@ def similarity(a, b):
 def get_dropbox_folders(path):
     """Get folders in Dropbox path"""
     headers = {
-        "Authorization": f"Bearer {DROPBOX_ACCESS_TOKEN}",
+        "Authorization": f"Bearer {get_access_token()}",
         "Content-Type": "application/json"
     }
     r = requests.post(
@@ -118,7 +124,7 @@ def find_matching_folder(search_text, folders):
 def folder_exists(path):
     """Check if a folder exists in Dropbox"""
     headers = {
-        "Authorization": f"Bearer {DROPBOX_ACCESS_TOKEN}",
+        "Authorization": f"Bearer {get_access_token()}",
         "Content-Type": "application/json"
     }
     r = requests.post(
@@ -131,7 +137,7 @@ def folder_exists(path):
 def create_folder(path):
     """Create a folder in Dropbox"""
     headers = {
-        "Authorization": f"Bearer {DROPBOX_ACCESS_TOKEN}",
+        "Authorization": f"Bearer {get_access_token()}",
         "Content-Type": "application/json"
     }
     requests.post(
@@ -143,7 +149,7 @@ def create_folder(path):
 def upload_to_dropbox(content, path):
     """Upload file to Dropbox"""
     headers = {
-        "Authorization": f"Bearer {DROPBOX_ACCESS_TOKEN}",
+        "Authorization": f"Bearer {get_access_token()}",
         "Content-Type": "application/octet-stream",
         "Dropbox-API-Arg": json.dumps({
             "path": path,
@@ -265,7 +271,7 @@ def magicplan_webhook():
         logger.info(f"Files to download: {[f[0] for f in files_to_download]}")
         
         # Download and upload to Dropbox
-        if DROPBOX_ACCESS_TOKEN:
+        if get_access_token():
             uploaded_photos = 0
             uploaded_plans = 0
             
@@ -299,7 +305,7 @@ def magicplan_webhook():
             logger.info(f"Upload complete: {uploaded_photos} photos/videos, {uploaded_plans} plans")
         
         else:
-            logger.warning("DROPBOX_ACCESS_TOKEN not set - files not uploaded")
+            logger.warning("Dropbox auth not configured - files not uploaded")
         
         # Return success response
         return Response(
@@ -363,12 +369,17 @@ def serve_dropbox_file():
             'Path must be under /TRUBILT/JOBS/ or /Trubilt/JOBS/', 403
         )
 
-    if not DROPBOX_ACCESS_TOKEN:
+    try:
+        token = get_access_token()
+    except Exception as e:
+        logger.error(f"/file Dropbox auth failed: {e}")
+        return _file_fetch_response('Dropbox auth failed on server', 500)
+    if not token:
         return _file_fetch_response('Dropbox not configured on server', 500)
 
     try:
         from dropbox_upload import DropboxUploader
-        uploader = DropboxUploader(DROPBOX_ACCESS_TOKEN)
+        uploader = DropboxUploader()
         content, content_type = uploader.download_file(dropbox_path)
     except Exception as e:
         logger.error(f"/file download failed for {dropbox_path}: {e}")
@@ -386,7 +397,11 @@ def serve_dropbox_file():
 @app.route('/health', methods=['GET'])
 def health():
     """Health check endpoint"""
-    return {"status": "ok", "dropbox_configured": bool(DROPBOX_ACCESS_TOKEN)}
+    try:
+        configured = bool(get_access_token())
+    except Exception:
+        configured = False
+    return {"status": "ok", "dropbox_configured": configured}
 
 @app.route('/test', methods=['GET'])
 def test_page():
@@ -402,8 +417,8 @@ def test_page():
     </ul>
     </body></html>
     """.format(
-        "Yes" if DROPBOX_ACCESS_TOKEN else "No",
-        len(get_job_folders()) if DROPBOX_ACCESS_TOKEN else "N/A"
+        "Yes" if get_access_token() else "No",
+        len(get_job_folders()) if get_access_token() else "N/A"
     )
 
 @app.route('/test-match', methods=['GET'])
@@ -430,8 +445,8 @@ if __name__ == '__main__':
     print("="*60)
     print(f"Starting on port {args.port}...")
     print(f"Webhook URL: http://localhost:{args.port}/webhook")
-    print(f"Dropbox: {'Configured' if DROPBOX_ACCESS_TOKEN else 'NOT CONFIGURED'}")
-    print(f"Job folders: {len(get_job_folders()) if DROPBOX_ACCESS_TOKEN else 0}")
+    print(f"Dropbox: {'Configured' if get_access_token() else 'NOT CONFIGURED'}")
+    print(f"Job folders: {len(get_job_folders()) if get_access_token() else 0}")
     print("")
     print("To expose to internet (for MagicPlan):")
     print(f"  ngrok http {args.port}")
