@@ -52,13 +52,24 @@
       return;
     }
     const json = await listResp.json();
-    FILES = json.files || [];
+    const allFiles = json.files || [];
+
+    // Only upload files under PLANS/ (sketches + reports) and
+    // PICTURES/EXISTING CONDITIONS/ (photos + videos). This excludes
+    // CONTRACTS/, ESTIMATES/, ORDERS/, scratch files, etc. that live in
+    // the same job folder but don't belong in Handoff.
+    const UPLOAD_SUBPATHS = ['/PLANS/', '/PICTURES/EXISTING CONDITIONS/'];
+    FILES = allFiles.filter(f =>
+      UPLOAD_SUBPATHS.some(sub => (f.path || '').includes(sub))
+    );
+
+    const skipped = allFiles.length - FILES.length;
     if (FILES.length === 0) {
-      console.error('No files found at that path. Check JOB_PATH.');
+      console.error(`No upload-eligible files found under ${JOB_PATH} (PLANS/ + PICTURES/EXISTING CONDITIONS/). Check JOB_PATH.`);
       return;
     }
     const totalMB = (FILES.reduce((a, f) => a + (f.size || 0), 0) / 1024 / 1024).toFixed(1);
-    console.log(`Found ${FILES.length} files (total ${totalMB} MB).`);
+    console.log(`Found ${FILES.length} eligible files (total ${totalMB} MB)${skipped ? `; skipping ${skipped} other files in the job folder` : ''}.`);
   } catch (e) {
     console.error('Error fetching file list:', e);
     return;
