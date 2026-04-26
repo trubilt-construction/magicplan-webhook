@@ -394,6 +394,82 @@ def serve_dropbox_file():
     return resp
 
 
+@app.route('/list', methods=['GET', 'OPTIONS'])
+def list_dropbox_folder():
+    """Return the list of files (recursively) under a Dropbox path.
+
+    Used by the Handoff page uploader to discover what to upload for a given
+    job folder, so the script doesn't need a hardcoded FILES list per job.
+
+    Auth + path safety are identical to /file. Response is JSON:
+        {"count": N, "files": [{"path", "name", "size", "type"}, ...]}
+    """
+    cors_headers = _file_fetch_cors_headers()
+
+    if request.method == 'OPTIONS':
+        resp = Response('', status=204)
+        for k, v in cors_headers.items():
+            resp.headers[k] = v
+        return resp
+
+    expected_token = os.environ.get('FILE_FETCH_TOKEN', '').strip()
+    if not expected_token:
+        logger.error("/list called but FILE_FETCH_TOKEN is not set")
+        return _file_fetch_response('Server not configured (FILE_FETCH_TOKEN missing)', 500)
+
+    provided_token = request.headers.get('X-Auth-Token') or request.args.get('token') or ''
+    if provided_token != expected_token:
+        return _file_fetch_response('Unauthorized', 401)
+
+    dropbox_path = request.args.get('path', '')
+    if not dropbox_path:
+        return _file_fetch_response('Missing path parameter', 400)
+    if '..' in dropbox_path or '\x00' in dropbox_path:
+        return _file_fetch_response('Invalid path', 400)
+    if not any(dropbox_path.startswith(p) for p in FILE_FETCH_ALLOWED_PREFIXES):
+        return _file_fetch_response(
+            'Path must be under /TRUBILT/JOBS/ or /Trubilt/JOBS/', 403
+        )
+
+    try:
+        token = get_access_token()
+    except Exception as e:
+        logger.error(f"/list Dropbox auth failed: {e}")
+        return _file_fetch_response('Dropbox auth failed on server', 500)
+    if not token:
+        return _file_fetch_response('Dropbox not configured on server', 500)
+
+    try:
+        from dropbox_upload import DropboxUploader
+        uploader = DropboxUploader()
+        files = uploader.list_folder_recursive(dropbox_path)
+    except Exception as e:
+        logger.error(f"/list listing failed for {dropbox_path}: {e}")
+        return _file_fetch_response(f'Error: {e}', 502)
+
+    # Annotate each file with a content-type guess so the uploader can pass it
+    # straight into File() without doing the lookup itself.
+    EXT_TO_TYPE = {
+        '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
+        '.heic': 'image/heic',
+        '.pdf': 'application/pdf',
+        '.mp4': 'video/mp4', '.mov': 'video/quicktime',
+        '.txt': 'text/plain',
+        '.dxf': 'application/dxf', '.svg': 'image/svg+xml',
+        '.xml': 'application/xml', '.json': 'application/json',
+    }
+    for f in files:
+        ext = os.path.splitext(f.get('name', ''))[1].lower()
+        f['type'] = EXT_TO_TYPE.get(ext, 'application/octet-stream')
+
+    body = json.dumps({'count': len(files), 'files': files})
+    resp = Response(body, status=200, mimetype='application/json')
+    for k, v in cors_headers.items():
+        resp.headers[k] = v
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
+
 @app.route('/health', methods=['GET'])
 def health():
     """Health check endpoint"""

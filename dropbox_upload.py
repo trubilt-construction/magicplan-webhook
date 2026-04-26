@@ -259,6 +259,60 @@ class DropboxUploader:
 
         return response.json()
 
+    def list_folder_recursive(self, dropbox_path):
+        """List every file (recursively) under a Dropbox folder.
+
+        Returns a list of {path, name, size} dicts. Folders are filtered out.
+        Handles Dropbox's pagination via /files/list_folder/continue.
+
+        Args:
+            dropbox_path: Dropbox folder (e.g. /TRUBILT/JOBS/.../1835 ONSLOW DR)
+
+        Raises:
+            Exception on a non-200 response from Dropbox.
+        """
+        if not dropbox_path.startswith('/'):
+            dropbox_path = '/' + dropbox_path
+
+        headers = {
+            "Authorization": f"Bearer {self.access_token}",
+            "Content-Type": "application/json",
+        }
+
+        files = []
+        cursor = None
+        while True:
+            if cursor is None:
+                resp = requests.post(
+                    f"{self.base_url}/files/list_folder",
+                    headers=headers,
+                    json={"path": dropbox_path, "recursive": True},
+                    timeout=20,
+                )
+            else:
+                resp = requests.post(
+                    f"{self.base_url}/files/list_folder/continue",
+                    headers=headers,
+                    json={"cursor": cursor},
+                    timeout=20,
+                )
+            if resp.status_code != 200:
+                raise Exception(
+                    f"Dropbox list_folder failed: {resp.status_code} - {resp.text}"
+                )
+            data = resp.json()
+            for entry in data.get('entries', []):
+                if entry.get('.tag') == 'file':
+                    files.append({
+                        'path': entry.get('path_display'),
+                        'name': entry.get('name'),
+                        'size': entry.get('size'),
+                    })
+            if not data.get('has_more'):
+                break
+            cursor = data.get('cursor')
+        return files
+
     def download_file(self, dropbox_path):
         """Download a file's bytes from Dropbox.
 
