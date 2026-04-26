@@ -150,21 +150,70 @@ class DropboxUploader:
         """Get a sharing link for a file"""
         if not path.startswith('/'):
             path = '/' + path
-        
+
         data = json.dumps({
             "path": path,
             "settings": {
                 "requested_visibility": "public"
             }
         })
-        
+
         response = requests.post(
             f"{self.base_url}/sharing/create_shared_link_with_settings",
             headers=self.headers,
             data=data
         )
-        
+
         return response.json()
+
+    def download_file(self, dropbox_path):
+        """Download a file's bytes from Dropbox.
+
+        Args:
+            dropbox_path: Full path in Dropbox (e.g. /TRUBILT/JOBS/.../file.pdf)
+
+        Returns:
+            (content_bytes, content_type_str)
+
+        Raises:
+            Exception on non-200 response.
+        """
+        if not dropbox_path.startswith('/'):
+            dropbox_path = '/' + dropbox_path
+
+        headers = {
+            "Authorization": f"Bearer {self.access_token}",
+            "Dropbox-API-Arg": json.dumps({"path": dropbox_path}),
+        }
+
+        response = requests.post(
+            f"{self.content_url}/files/download",
+            headers=headers,
+            stream=False,
+        )
+
+        if response.status_code != 200:
+            raise Exception(
+                f"Dropbox download failed: {response.status_code} - {response.text}"
+            )
+
+        ext = os.path.splitext(dropbox_path)[1].lower()
+        content_type = {
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.png': 'image/png',
+            '.pdf': 'application/pdf',
+            '.mp4': 'video/mp4',
+            '.mov': 'video/quicktime',
+            '.heic': 'image/heic',
+            '.txt': 'text/plain',
+            '.dxf': 'application/dxf',
+            '.svg': 'image/svg+xml',
+            '.xml': 'application/xml',
+            '.json': 'application/json',
+        }.get(ext, 'application/octet-stream')
+
+        return response.content, content_type
 
 
 def main():

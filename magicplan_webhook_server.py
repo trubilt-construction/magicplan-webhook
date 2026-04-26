@@ -23,6 +23,30 @@ from difflib import SequenceMatcher
 from flask import Flask, request, Response
 import logging
 
+# Allowed Dropbox path prefixes for /file endpoint (defence-in-depth: stops the
+# endpoint from being abused as a generic Dropbox file reader if the auth token
+# leaks).
+FILE_FETCH_ALLOWED_PREFIXES = ("/TRUBILT/JOBS/", "/Trubilt/JOBS/")
+# Origin allowed to fetch via /file (Handoff). Keep tight — single origin.
+FILE_FETCH_ALLOW_ORIGIN = "https://app.handoff.ai"
+
+
+def _file_fetch_cors_headers():
+    return {
+        "Access-Control-Allow-Origin": FILE_FETCH_ALLOW_ORIGIN,
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Headers": "X-Auth-Token, Content-Type",
+        "Access-Control-Max-Age": "3600",
+        "Vary": "Origin",
+    }
+
+
+def _file_fetch_response(body, status, mimetype="text/plain"):
+    resp = Response(body, status=status, mimetype=mimetype)
+    for k, v in _file_fetch_cors_headers().items():
+        resp.headers[k] = v
+    return resp
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -288,9 +312,76 @@ def magicplan_webhook():
         import traceback
         traceback.print_exc()
         return Response(
-            f'<MagicPlanService><status>1</status><message>{str(e)}</message></MagicPlanService>', 
+            f'<MagicPlanService><status>1</status><message>{str(e)}</message></MagicPlanService>',
             mimetype='text/xml'
         ), 500
+
+
+@app.route('/file', methods=['GET', 'OPTIONS'])
+def serve_dropbox_file():
+    """Serve a Dropbox file's bytes to authenticated callers, with CORS for Handoff.
+
+    Used by the Handoff page to fetch each captured file from Dropbox and
+    upload it via Handoff's normal upload flow (DataTransfer + change event).
+
+    Auth: shared secret in either the X-Auth-Token header or `token` query param,
+    matched against the FILE_FETCH_TOKEN env var. The header is preferred so the
+    secret stays out of server access logs.
+
+    Path safety: the requested Dropbox path must start with /TRUBILT/JOBS/ (or
+    /Trubilt/JOBS/) and must not contain "..". This stops the endpoint from
+    being used to read arbitrary files in the linked Dropbox account if the
+    token is ever exposed.
+    """
+    cors_headers = _file_fetch_cors_headers()
+
+    # CORS preflight
+    if request.method == 'OPTIONS':
+        resp = Response('', status=204)
+        for k, v in cors_headers.items():
+            resp.headers[k] = v
+        return resp
+
+    # Auth
+    expected_token = os.environ.get('FILE_FETCH_TOKEN', '').strip()
+    if not expected_token:
+        logger.error("/file called but FILE_FETCH_TOKEN is not set")
+        return _file_fetch_response('Server not configured (FILE_FETCH_TOKEN missing)', 500)
+
+    provided_token = request.headers.get('X-Auth-Token') or request.args.get('token') or ''
+    if provided_token != expected_token:
+        return _file_fetch_response('Unauthorized', 401)
+
+    # Path
+    dropbox_path = request.args.get('path', '')
+    if not dropbox_path:
+        return _file_fetch_response('Missing path parameter', 400)
+    if '..' in dropbox_path or '\x00' in dropbox_path:
+        return _file_fetch_response('Invalid path', 400)
+    if not any(dropbox_path.startswith(p) for p in FILE_FETCH_ALLOWED_PREFIXES):
+        return _file_fetch_response(
+            'Path must be under /TRUBILT/JOBS/ or /Trubilt/JOBS/', 403
+        )
+
+    if not DROPBOX_ACCESS_TOKEN:
+        return _file_fetch_response('Dropbox not configured on server', 500)
+
+    try:
+        from dropbox_upload import DropboxUploader
+        uploader = DropboxUploader(DROPBOX_ACCESS_TOKEN)
+        content, content_type = uploader.download_file(dropbox_path)
+    except Exception as e:
+        logger.error(f"/file download failed for {dropbox_path}: {e}")
+        return _file_fetch_response(f'Error: {e}', 502)
+
+    resp = Response(content, status=200, mimetype=content_type)
+    for k, v in cors_headers.items():
+        resp.headers[k] = v
+    # Caching off — the Handoff page fetches once per upload and we don't want
+    # any intermediary caching the auth-gated bytes.
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
 
 @app.route('/health', methods=['GET'])
 def health():
