@@ -470,6 +470,106 @@ def list_dropbox_folder():
     return resp
 
 
+@app.route('/pull/<project_id>', methods=['POST', 'OPTIONS'])
+def pull_project(project_id):
+    """Pull a MagicPlan project's full file set into the matching Dropbox job folder.
+
+    Triggered by the trubilt-magicplan-export skill via Chrome MCP fetch — same
+    underlying export logic as the magicplan_export_mapped.py CLI (we import its
+    export_project). This exists so the skill doesn't need shell access on the
+    user's machine.
+
+    Auth: shared secret in `X-Auth-Token` header or `token` query param,
+    matched against the FILE_FETCH_TOKEN env var (same secret as /file and /list).
+
+    project_id safety: must look like a hyphen-and-hex UUID (no path traversal).
+
+    Long-running: /pull can take 30+ seconds for projects with 100+ files. The
+    Procfile bumps gunicorn --timeout to 300 to accommodate.
+
+    Response (JSON): the dict returned by export_project (matched_folder, counts,
+    failure_details, etc.) plus a `log` field with the captured stdout.
+    """
+    # CORS preflight (skill calls /pull from a same-origin Chrome tab navigated
+    # to the Railway domain, so CORS isn't strictly needed — but be permissive
+    # for any future cross-origin caller; the token gate is the actual auth).
+    if request.method == 'OPTIONS':
+        resp = Response('', status=204)
+        origin = request.headers.get('Origin', '*')
+        resp.headers['Access-Control-Allow-Origin'] = origin
+        resp.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+        resp.headers['Access-Control-Allow-Headers'] = 'X-Auth-Token, Content-Type'
+        resp.headers['Vary'] = 'Origin'
+        return resp
+
+    # Auth
+    expected_token = os.environ.get('FILE_FETCH_TOKEN', '').strip()
+    if not expected_token:
+        logger.error("/pull called but FILE_FETCH_TOKEN is not set")
+        return Response('Server not configured (FILE_FETCH_TOKEN missing)', status=500)
+    provided = request.headers.get('X-Auth-Token') or request.args.get('token') or ''
+    if provided != expected_token:
+        return Response('Unauthorized', status=401)
+
+    # Path safety on project_id
+    if not re.fullmatch(r'[a-fA-F0-9-]{8,64}', project_id):
+        return Response(
+            json.dumps({"ok": False, "error": "invalid_project_id"}),
+            mimetype='application/json',
+            status=400,
+        )
+
+    # Run export with stdout captured for the response 'log' field
+    from io import StringIO
+    from contextlib import redirect_stdout
+    try:
+        import magicplan_export_mapped
+    except Exception as exc:
+        logger.exception("/pull: failed to import magicplan_export_mapped")
+        return Response(
+            json.dumps({"ok": False, "error": f"import_failed: {exc}"}),
+            mimetype='application/json',
+            status=500,
+        )
+
+    buf = StringIO()
+    try:
+        with redirect_stdout(buf):
+            result = magicplan_export_mapped.export_project(project_id)
+    except Exception as exc:
+        logger.exception(f"/pull: export_project crashed for {project_id}")
+        return Response(
+            json.dumps({
+                "ok": False,
+                "error": str(exc),
+                "log": buf.getvalue(),
+            }),
+            mimetype='application/json',
+            status=500,
+        )
+
+    # export_project returns False if the matcher didn't find a folder (no upload attempted),
+    # or a dict with the per-run summary.
+    if result is False:
+        body = {
+            "ok": False,
+            "error": "no_matching_folder",
+            "log": buf.getvalue(),
+        }
+        return Response(json.dumps(body), mimetype='application/json', status=200)
+
+    if isinstance(result, dict):
+        result["log"] = buf.getvalue()
+        return Response(json.dumps(result), mimetype='application/json', status=200)
+
+    # Defensive: shouldn't happen but don't crash on unexpected shape
+    return Response(
+        json.dumps({"ok": False, "error": "unexpected_result_shape", "log": buf.getvalue()}),
+        mimetype='application/json',
+        status=500,
+    )
+
+
 @app.route('/health', methods=['GET'])
 def health():
     """Health check endpoint"""
