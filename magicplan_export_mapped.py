@@ -96,21 +96,50 @@ def get_dropbox_folders(path):
     )
 
 def find_matching_folder(address, folders, project_name=""):
-    """Find the best matching folder for an address"""
-    # Prefer project_name if address is empty/useless
-    search_text = project_name if not address or address.lower() == "none" else f"{address} {project_name}"
+    """Find the best matching folder for an address.
+
+    Uses the project's street address (the part before the first comma) as the
+    primary search text — that's what Dropbox folder names are based on. The
+    project name is only used as a fallback when address is missing.
+
+    Why not include the city/zip or project_name in the search text? Because
+    folder names like ``307 TIMOTHY RD`` are short and don't contain city/zip
+    tokens. When the search string includes ``Jacksonville 28546 Gucciardini
+    Meeting``, every Jacksonville-area folder picks up a token-presence hit on
+    "Jacksonville", and the longer search string drops the sequence-similarity
+    score for the correct (short) folder. On 2026-04-28 that combination
+    routed Gucciardini's 90 files to ``2119 NORTH DR, JACKSONVILLE 28540``
+    instead of ``307 TIMOTHY RD``. See README.md "Known issues" for the full
+    incident analysis.
+
+    A street-only search ("307 Timothy Road" → tokens ``307`` + ``timothy``)
+    matches the correct short folder cleanly and starves the wrong-address
+    folders of any token hits.
+    """
+    # Prefer the street address only. Falls back to full address (which may be
+    # all we have if the caller didn't pass a comma-separated form), then to
+    # project_name when address is empty or literally "none".
+    if address and address.lower() != "none":
+        # Take the part before the first comma — typically just the street
+        # ("307 Timothy Road" out of "307 Timothy Road, Jacksonville 28546").
+        street_only = address.split(",", 1)[0].strip()
+        search_text = street_only or address
+    else:
+        search_text = project_name
+
     if not search_text or not folders:
         return None
-    
+
     # Clean up search text
     search_parts = search_text.lower().replace(',', ' ').replace('-', ' ').split()
-    
+
     best_match = None
     best_score = 0
-    
+    second_best_score = 0
+
     for folder in folders:
         folder_clean = folder.lower().replace('-', ' ').replace(',', ' ')
-        
+
         # Check each word
         score = 0
         matches = 0
@@ -118,19 +147,24 @@ def find_matching_folder(address, folders, project_name=""):
             if len(part) > 2 and part in folder_clean:
                 matches += 1
                 score += len(part)  # Longer matches = higher score
-        
+
         # Also check overall similarity
         text_similarity = similarity(search_text.lower(), folder.lower())
-        
+
         # Combined score
         total_score = score * 0.7 + text_similarity * 100 * 0.3
-        
+
         if total_score > best_score:
+            second_best_score = best_score
             best_score = total_score
             best_match = folder
-    
-    # Only return if confidence is reasonable
-    if best_score > 5:
+        elif total_score > second_best_score:
+            second_best_score = total_score
+
+    # Only return if confidence is reasonable AND the best beats the second-best
+    # by a clear margin — close calls used to pick the wrong folder when the
+    # winning margin was decided by city/zip tokens (e.g., "Jacksonville").
+    if best_score > 10 and (best_score - second_best_score) >= 3:
         return best_match
     return None
 

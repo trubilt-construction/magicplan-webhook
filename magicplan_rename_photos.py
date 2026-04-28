@@ -430,6 +430,15 @@ def main() -> int:
              "~/.opencode/playwright-magicplan/state.json. The daemon and "
              "subsequent runs use that state file (no Keychain involvement).",
     )
+    parser.add_argument(
+        "--matched-folder",
+        default=None,
+        help="Override the Dropbox job folder name (relative to --dropbox-base). "
+             "When set, skips the /test-match call entirely. Use this when the "
+             "fuzzy matcher is mis-routing — e.g., a project titled 'Gucciardini "
+             "Meeting' shouldn't match '2119 NORTH DR' just because both contain "
+             "'JACKSONVILLE'. Pass the folder name only, not the full path.",
+    )
     args = parser.parse_args()
 
     print(f"[magicplan] fetching project metadata for {args.project_id}...")
@@ -446,12 +455,24 @@ def main() -> int:
         by_filetype[f.get("filetype", "?")] += 1
     print(f"           total: {len(files)} files {dict(by_filetype)}")
 
-    print(f"[webhook] resolving Dropbox folder via /test-match...")
-    matched = webhook_test_match(project_name)
-    if not matched:
-        print(f"           ERROR: no matched folder for project '{project_name}'", file=sys.stderr)
-        return 2
-    print(f"           matched: {matched}")
+    if args.matched_folder:
+        # Explicit override: skip /test-match entirely. Use this when the
+        # fuzzy matcher is wrong for this project.
+        matched = args.matched_folder
+        print(f"[match]   using --matched-folder override: {matched}")
+    else:
+        # Default: ask /test-match, but use the project's STREET ADDRESS rather
+        # than the project name. The project name often contains noisy tokens
+        # like "Meeting" and "Apartments" that don't appear in Dropbox folder
+        # names; the street address is what folder names are actually based on.
+        # Falls back to project name if address.street isn't set.
+        match_input = (addr or {}).get("street") or project_name
+        print(f"[webhook] resolving Dropbox folder via /test-match (input='{match_input}')...")
+        matched = webhook_test_match(match_input)
+        if not matched:
+            print(f"           ERROR: no matched folder for '{match_input}'", file=sys.stderr)
+            return 2
+        print(f"           matched: {matched}")
 
     job_folder = Path(args.dropbox_base) / matched
     photos_folder = job_folder / "PICTURES" / "EXISTING CONDITIONS"
