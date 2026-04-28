@@ -93,31 +93,57 @@ def get_dropbox_folders(path):
     return []
 
 def find_matching_folder(search_text, folders):
-    """Find the best matching folder for a project name/address"""
+    """Find the best matching folder for a project name/address.
+
+    Mirrors the hardened logic in ``magicplan_export_mapped.find_matching_folder``
+    (see that module + README "Known issues" for the 2026-04-28 mis-route
+    incident analysis). The two functions share the same scoring math so the
+    /webhook (inbound MagicPlan), /test-match (caller-driven preflight), and
+    /pull (server-driven export) paths all route the same way.
+
+    Behavior:
+    - If ``search_text`` contains a comma, only the part before the first
+      comma is used. That strips noisy city/zip/etc. tokens that pull the
+      matcher toward unrelated folders sharing those tokens (e.g. multiple
+      "Jacksonville" folders).
+    - Threshold raised from 5 to 10 to require a real signal, not just an
+      incidental city/zip token hit.
+    - Best score must beat second-best by at least 3 points so a single
+      shared token can't decide a close call.
+    """
     if not search_text or not folders:
         return None
-    
-    search_parts = search_text.lower().replace(',', ' ').replace('-', ' ').split()
-    
+
+    # Strip everything after the first comma. Most callers pass either a
+    # raw project_name (no comma — works as-is) or a "street, city zip"
+    # address (we want just the street).
+    primary = search_text.split(",", 1)[0].strip() or search_text
+
+    search_parts = primary.lower().replace(',', ' ').replace('-', ' ').split()
+
     best_match = None
     best_score = 0
-    
+    second_best_score = 0
+
     for folder in folders:
         folder_clean = folder.lower().replace('-', ' ').replace(',', ' ')
-        
+
         score = 0
         for part in search_parts:
             if len(part) > 2 and part in folder_clean:
                 score += len(part)
-        
-        text_similarity = similarity(search_text.lower(), folder.lower())
+
+        text_similarity = similarity(primary.lower(), folder.lower())
         total_score = score * 0.7 + text_similarity * 100 * 0.3
-        
+
         if total_score > best_score:
+            second_best_score = best_score
             best_score = total_score
             best_match = folder
-    
-    if best_score > 5:
+        elif total_score > second_best_score:
+            second_best_score = total_score
+
+    if best_score > 10 and (best_score - second_best_score) >= 3:
         return best_match
     return None
 
